@@ -1,4 +1,7 @@
-//std::pair<char *, size_t>, ... 
+
+#ifndef __DG_HUFFMAN_ENCODER__
+#define __DG_HUFFMAN_ENCODER__
+
 #include <memory>
 #include <vector>
 #include <algorithm>
@@ -9,6 +12,7 @@
 #include <iostream>
 #include "serialization.h"
 #include <array>
+#include "assert.h"
 
 namespace dg::huffman_encoder::constants{
 
@@ -406,44 +410,71 @@ namespace dg::huffman_encoder::core{
                     }
                 }
             }
+    };
+    
+    //API - should consider array approach if compile-time deterministic - 
+    class RowEncodingEngine{
 
-            auto bitcount_encode(const char * inp, size_t sz) const noexcept -> size_t{
+        private:
 
-                auto bit_dumper     = [](...) noexcept{};
-                return encode_into(inp, sz, {}, 0u, bit_dumper);
+            std::vector<std::unique_ptr<DelimEngine>> encoders;
+        
+        public:
+
+            RowEncodingEngine(std::vector<std::unique_ptr<DelimEngine>> encoders): encoders(std::move(encoders)){}
+
+            auto encode_into(const std::vector<std::pair<const char *, size_t>>& data, char * buf) const -> char *{
+
+                assert(data.size() == this->encoders.size()); 
+                size_t buf_bit_offs = 0u;
+
+                for (size_t i = 0; i < data.size(); ++i){
+                    buf_bit_offs = this->encoders[i]->encode_into(data[i].first, data[i].second, buf, buf_bit_offs);
+                }
+
+                return buf + byte_array::byte_size(buf_bit_offs);
             }
 
-            auto count_encode(const char * inp, size_t sz) const noexcept -> size_t{
+            auto decode_into(const char * buf, std::vector<std::pair<char *, size_t>>& data) const -> const char *{
 
-                return byte_array::byte_size(bitcount_encode(inp, sz));
+                assert(data.size() == this->encoders.size());
+                size_t buf_bit_offs = 0u;
+
+                for (size_t i = 0; i < this->encoders.size(); ++i){
+                    data[i].second = 0u;
+                    std::tie(buf_bit_offs, data[i].second) = this->encoders[i]->decode_into(buf, buf_bit_offs, data[i].first, data[i].second); 
+                }
+
+                return buf + byte_array::byte_size(buf_bit_offs);
             }
 
-            auto count_decode(const char * inp, size_t bit_offs) const noexcept -> size_t{
+            auto count_encode(const std::vector<std::pair<const char *, size_t>>& data) const -> size_t{
 
-                auto byte_dumper    = [](...) noexcept{};
-                auto [_, sz]        = decode_into(inp, bit_offs, {}, 0u, byte_dumper); 
+                assert(data.size() == this->encoders.size());
+                size_t buf_bit_offs = 0u;
+                auto empty_lambda   = [](...) noexcept{};
 
-                return sz;
-            } 
+                for (size_t i = 0; i < data.size(); ++i){
+                    buf_bit_offs = this->encoders[i]->encode_into(data[i].first, data[i].second, {}, buf_bit_offs, empty_lambda);
+                } 
 
-            auto encode(const char * inp, size_t sz) const -> std::pair<std::unique_ptr<char[]>, size_t>{
-
-                auto ssz    = count_encode(inp, sz);
-                auto buf    = std::unique_ptr<char[]>(new char[ssz]);
-                encode_into(inp, sz, buf.get(), 0u); 
-
-                return {std::move(buf), ssz};
+                return byte_array::byte_size(buf_bit_offs);
             }
 
-            auto decode(const char * inp) const -> std::pair<std::unique_ptr<char[]>, size_t>{
+            auto count_decode(const char * buf) const -> std::vector<size_t>{
 
-                auto sz     = count_decode(inp, 0u);
-                auto buf    = std::unique_ptr<char[]>(new char[sz]);
-                decode_into(inp, 0u, buf.get(), 0u);
+                auto rs             = std::vector<size_t>(this->encoders.size());
+                size_t buf_bit_offs = 0u;
+                auto empty_lambda   = [](...) noexcept{};
 
-                return {std::move(buf), sz};
+                for (size_t i = 0; i < this->encoders.size(); ++i){
+                    std::tie(buf_bit_offs, rs[i])  = this->encoders[i]->decode_into(buf, buf_bit_offs, {}, 0u, empty_lambda);
+                }
+
+                return rs;
             }
     };
+
 }
 
 namespace dg::huffman_encoder::user_interface{
@@ -453,19 +484,27 @@ namespace dg::huffman_encoder::user_interface{
         return make::count(buf, sz);
     }
 
-    auto build(std::vector<size_t> count) -> std::unique_ptr<model::Node>{
+    auto build(std::vector<size_t> counter) -> std::unique_ptr<model::Node>{
 
-        auto counter_node   = make::build(make::defaultize_noncounted(std::move(count)));
+        auto counter_node   = make::build(make::defaultize_noncounted(std::move(counter)));
         return make::to_model(counter_node.get());
     }
 
-    auto spawn_delim_engine(model::Node * huffman_tree) -> core::DelimEngine{
+    auto spawn_delim_engine(model::Node * huffman_tree) -> std::unique_ptr<core::DelimEngine>{
 
         auto delim          = std::vector<std::vector<bool>>(constants::ALPHABET_SIZE);
         auto decoding_dict  = make::to_delim_tree(huffman_tree);
         auto encoding_dict  = make::dictionarize(decoding_dict.get());
         make::find_delim(decoding_dict.get(), delim);
+        auto rs             =  core::DelimEngine(std::move(encoding_dict), std::move(delim), std::move(decoding_dict));
 
-        return core::DelimEngine(std::move(encoding_dict), std::move(delim), std::move(decoding_dict));
+        return std::make_unique<core::DelimEngine>(std::move(rs));
+    }
+
+    auto spawn_multi_fields_engine(std::vector<std::unique_ptr<core::DelimEngine>> encoders) -> std::unique_ptr<core::RowEncodingEngine>{
+
+        return std::make_unique<core::RowEncodingEngine>(std::move(encoders));
     }
 }
+
+#endif
