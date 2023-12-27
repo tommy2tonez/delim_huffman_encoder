@@ -171,7 +171,7 @@ namespace dg::huffman_encoder::make{
 
     auto defaultize_noncounted(std::vector<size_t> count){
 
-        auto transformer    = [](size_t count){return std::min(size_t{1}, count);};
+        auto transformer    = [](size_t count){return std::max(size_t{1}, count);};
         std::transform(count.begin(), count.end(), count.begin(), transformer);
 
         return count;
@@ -346,6 +346,7 @@ namespace dg::huffman_encoder::core{
                                                                           delim(std::move(delim)),
                                                                           decoding_dict(std::move(decoding_dict)){} 
 
+            //REVIEW: optimizable - 
             template <class BitDumpDevice = decltype(byte_array::bit_dump_lambda)>
             auto encode_into(const char * inp_buf, size_t inp_sz, char * op_buf, size_t op_bit_offs, const BitDumpDevice& bit_dumper = byte_array::bit_dump_lambda) const noexcept -> size_t{
                 
@@ -355,7 +356,7 @@ namespace dg::huffman_encoder::core{
 
                 for (size_t i = 0; i < cycles; ++i){
                     auto num_rep        = num_rep_type{};
-                    ibuf                = dg::compact_serializer::core::deserialize(ibuf, num_rep);
+                    ibuf                = dg::compact_serializer::core::deserialize(ibuf, num_rep); //unaligned mem-access and memcpy - bottleneck
                     const auto& bvec    = encoding_dict[num_rep];
                     static_assert(noexcept(bit_dumper(op_buf, op_bit_offs, bvec)));
                     bit_dumper(op_buf, op_bit_offs, bvec); 
@@ -374,6 +375,7 @@ namespace dg::huffman_encoder::core{
                 return op_bit_offs;
             }
 
+            //REVIEW: optimizable - future refactoring consideration
             template <class ByteDumpDevice = decltype(byte_array::byte_dump_lambda)>
             auto decode_into(const char * inp_buf, size_t inp_bit_offs, char * op_buf, size_t op_offs, const ByteDumpDevice& byte_dumper = byte_array::byte_dump_lambda) const noexcept -> std::pair<size_t, size_t>{
                  
@@ -441,8 +443,7 @@ namespace dg::huffman_encoder::core{
                 size_t buf_bit_offs = 0u;
 
                 for (size_t i = 0; i < this->encoders.size(); ++i){
-                    data[i].second = 0u;
-                    std::tie(buf_bit_offs, data[i].second) = this->encoders[i]->decode_into(buf, buf_bit_offs, data[i].first, data[i].second); 
+                    std::tie(buf_bit_offs, data[i].second) = this->encoders[i]->decode_into(buf, buf_bit_offs, data[i].first, 0u); 
                 }
 
                 return buf + byte_array::byte_size(buf_bit_offs);
@@ -474,7 +475,6 @@ namespace dg::huffman_encoder::core{
                 return rs;
             }
     };
-
 }
 
 namespace dg::huffman_encoder::user_interface{
