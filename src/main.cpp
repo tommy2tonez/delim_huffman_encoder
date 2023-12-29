@@ -1,21 +1,9 @@
 #include "huffman_encoder.h"
 #include <string>
 #include <iostream>
-#include <fstream>
+#include <random>
+#include <functional>
 #include <chrono>
-
-auto read(const char * file) -> std::pair<std::unique_ptr<char[]>, size_t>{
-
-    std::ifstream inp_file(file);
-
-    inp_file.seekg(0u, inp_file.end);
-    auto sz     = inp_file.tellg();
-    auto buf    = std::unique_ptr<char[]>(new char[sz]);
-    inp_file.seekg(0u, inp_file.beg);
-    inp_file.read(buf.get(), sz);
-
-    return {std::move(buf), sz}; 
-}
 
 template <class Executable>
 auto timeit(Executable exe) -> size_t{
@@ -28,22 +16,42 @@ auto timeit(Executable exe) -> size_t{
     return l;    
 }
 
+auto randomize_buf(const size_t N) -> std::unique_ptr<char[]>{
+
+    static auto rand_dev    = std::bind(std::uniform_int_distribution<char>{}, std::mt19937{});
+    auto buf    = std::unique_ptr<char[]>(new char[N]);
+    std::generate(buf.get(), buf.get() + N, rand_dev);
+
+    return buf;
+}  
+
 int main(){
 
     using namespace dg::huffman_encoder::user_interface;
+    const size_t RANGE      = 30;
+    auto rand_dev           = std::bind(std::uniform_int_distribution<size_t>(0u, RANGE), std::mt19937{});
 
-    const char * buf = "tommy2tonez";
-    char c[1000];
-    char c2[1000];
-    
-    auto d  = build(count(buf, 11));
-    auto e  = spawn_fast_engine(d.get());
+    while (true){
 
-    auto rd = dg::huffman_encoder::types::bit_array_type{};
-    auto l  = e.encode_into(buf, 11, c, rd);
-    auto [b, c2l] = e.fast_decode_into(c, 0u, std::distance(c, l) * CHAR_BIT, c2); 
-
-    for (size_t i = 0; i < 11; ++i){
-        std::cout << c2[i];
+        auto sz     = rand_dev();
+        auto buf    = randomize_buf(sz);
+        auto d      = build(count(buf.get(), sz));
+        auto sd     = dg::compact_serializer::serialize(d);
+        auto ds     = dg::compact_serializer::deserialize<decltype(d)>(sd.first.get(), sd.second);
+        auto e      = spawn_fast_engine(ds.get());
+        auto bbuf   = std::unique_ptr<char[]>(new char[dg::huffman_encoder::constants::MAX_ENCODING_SZ_PER_BYTE * sz]);
+        auto rdbuf  = dg::huffman_encoder::types::bit_array_type{};
+        auto last   = e->encode_into(buf.get(), sz, bbuf.get(), rdbuf);
+        auto span   = std::distance(bbuf.get(), last);
+        
+        auto decoded    = std::unique_ptr<char[]>(new char[dg::huffman_encoder::constants::MAX_DECODING_SZ_PER_BYTE * span]);
+        auto [_, llast] = e->fast_decode_into(bbuf.get(), 0u, span * CHAR_BIT, decoded.get());
+        
+        if (std::memcmp(buf.get(), decoded.get(), sz) != 0 || std::distance(decoded.get(), llast) != sz){
+            std::cout << "mayday" << std::endl;
+            std::abort();
+        }
     }
+
+
 }
