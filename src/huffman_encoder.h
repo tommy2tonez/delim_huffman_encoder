@@ -38,6 +38,13 @@ namespace dg::huffman_encoder::types{
                                                                         void>>;
 } 
 
+namespace dg::huffman_encoder::precond{
+
+    static_assert(dg::compact_serializer::constants::endianness == std::endian::little);
+    static_assert(std::is_unsigned_v<types::bit_container_type>);
+    static_assert(-1 == ~0);
+}
+
 namespace dg::huffman_encoder::model{
 
     using namespace huffman_encoder::types;
@@ -69,7 +76,7 @@ namespace dg::huffman_encoder::model{
 namespace dg::huffman_encoder::utility{
 
     template <class T, class TransformLambda>
-    auto vector_transform(const std::vector<T>& lhs, const TransformLambda& transform_lambda) -> std::vector<decltype(transform_lambda(std::declval<T>()))>{
+    static auto vector_transform(const std::vector<T>& lhs, const TransformLambda& transform_lambda) -> std::vector<decltype(transform_lambda(std::declval<T>()))>{
 
         auto rs = std::vector<decltype(transform_lambda(std::declval<T>()))>();
         std::transform(lhs.begin(), lhs.end(), std::back_inserter(rs), transform_lambda);
@@ -77,8 +84,8 @@ namespace dg::huffman_encoder::utility{
         return rs;
     } 
 
-    template <class T,  std::enable_if_t<std::is_fundamental_v<T>, bool> = true>
-    auto to_bit_deque(T val) -> std::deque<bool>{
+    template <class T,  std::enable_if_t<std::is_unsigned_v<T>, bool> = true>
+    static auto to_bit_deque(T val) -> std::deque<bool>{
 
         auto rs         = std::deque<bool>();
         auto idx_seq    = std::make_index_sequence<sizeof(T) * CHAR_BIT>{};
@@ -95,7 +102,6 @@ namespace dg::huffman_encoder::utility{
 
         return rs;
     } 
-
 }
 
 namespace dg::huffman_encoder::byte_array{
@@ -122,9 +128,14 @@ namespace dg::huffman_encoder::byte_array{
         return char{1} << offs;
     } 
 
+    constexpr auto max_bitmask() -> char{
+
+        return ~char{0u};
+    } 
+
     constexpr auto false_toggle(size_t offs) -> char{
 
-        return char{-1} ^ true_toggle(offs); 
+        return max_bitmask() ^ true_toggle(offs);
     }
 
     constexpr auto read(const char * op, size_t idx) -> bool{
@@ -134,14 +145,14 @@ namespace dg::huffman_encoder::byte_array{
 
     constexpr auto read_byte(const char * op, size_t idx) -> char{
         
-        auto rs         = char{};
+        auto rs         = char{0u};
         auto idx_seq    = std::make_index_sequence<CHAR_BIT>{};
 
         [&]<size_t ...IDX>(const std::index_sequence<IDX...>){
             ([&]{
                 (void) IDX;
                 rs <<= 1;
-                rs |= read(op, idx + (CHAR_BIT - IDX - 1));    
+                rs |= static_cast<char>(read(op, idx + (CHAR_BIT - IDX - 1)));    
             }(), ...);
         }(idx_seq);
 
@@ -200,6 +211,7 @@ namespace dg::huffman_encoder::bit_array{
 
     auto to_bit_array(const std::vector<bool>& vec) -> bit_array_type{
 
+        assert(vec.size() <= array_cap());
         auto rs = bit_array_type{};
 
         for (size_t i = 0; i < vec.size(); ++i){
@@ -214,7 +226,7 @@ namespace dg::huffman_encoder::bit_stream{
 
     using namespace huffman_encoder::types; 
 
-    auto stream_to(char * dst, const bit_array_type& src, bit_array_type& stream_buf) noexcept -> char *{
+    static auto stream_to(char * dst, const bit_array_type& src, bit_array_type& stream_buf) noexcept -> char *{
 
         if (bit_array::size(stream_buf) + bit_array::size(src) < bit_array::array_cap()){
             bit_array::append(stream_buf, src);
@@ -228,15 +240,16 @@ namespace dg::huffman_encoder::bit_stream{
         return dst;
     }
 
-    auto exhaust_to(char * dst, bit_array_type& stream_buf) noexcept -> char *{
+    static auto exhaust_to(char * dst, bit_array_type& stream_buf) noexcept -> char *{
 
-        auto bsz    = byte_array::byte_size(bit_array::size(stream_buf));
+        constexpr auto LOWER_MASK   = bit_container_type{std::numeric_limits<unsigned char>::max()};
+        auto bsz                    = byte_array::byte_size(bit_array::size(stream_buf));
 
         if (bsz == sizeof(bit_container_type)){
             dst = dg::compact_serializer::core::serialize(stream_buf.first, dst);
         } else{
             for (size_t i = 0; i < bsz; ++i){
-                (*dst++) = stream_buf.first & char{-1}; 
+                dst =  dg::compact_serializer::core::serialize(static_cast<unsigned char>(stream_buf.first & LOWER_MASK), dst);
                 stream_buf.first >>= CHAR_BIT;
             }
         }
@@ -246,25 +259,15 @@ namespace dg::huffman_encoder::bit_stream{
     }
 
     template <size_t SZ>
-    constexpr auto lowerbitmask(const std::integral_constant<size_t, SZ>) -> size_t{
-
-        constexpr auto BIT_CAP  = static_cast<size_t>(sizeof(size_t)) * CHAR_BIT;
-        static_assert(SZ <= BIT_CAP);
-
-        if constexpr(SZ == BIT_CAP){
-            return ~size_t{0u};
-        } else{
-            return (size_t{1} << SZ) - 1;
-        }
-    } 
-
-    template <size_t SZ>
     constexpr auto read(const char * op, size_t idx, const std::integral_constant<size_t, SZ>) -> bit_container_type{
+       
+        static_assert(SZ < bit_array::array_cap() - CHAR_BIT); //stricter req
 
-        auto cursor = bit_container_type{}; 
-        dg::compact_serializer::core::deserialize(op + byte_array::slot(idx), cursor); //precond: LE serialization 
+        constexpr auto LOWER_BITMASK    = (bit_container_type{1} << SZ) - 1; 
+        auto cursor                     = bit_container_type{}; 
+        dg::compact_serializer::core::deserialize(op + byte_array::slot(idx), cursor);
 
-        return (cursor >> byte_array::offs(idx)) & lowerbitmask(std::integral_constant<size_t, SZ>{});
+        return (cursor >> byte_array::offs(idx)) & LOWER_BITMASK;
     }
 
     constexpr auto read_padd_requirement() -> size_t{
@@ -284,7 +287,7 @@ namespace dg::huffman_encoder::make{
         word_type c;
     };
 
-    auto count(const char * buf, size_t sz) -> std::vector<size_t>{
+    static auto count(const char * buf, size_t sz) -> std::vector<size_t>{
 
         auto counter    = std::vector<size_t>(constants::DICT_SIZE);
         auto cycles     = sz / constants::ALPHABET_SIZE;
@@ -301,17 +304,16 @@ namespace dg::huffman_encoder::make{
         return counter;
     }
 
-    auto clamp(std::vector<size_t> count){
+    static auto clamp(std::vector<size_t> count){
         
         const auto MMIN     = size_t{1u};
-        const auto MMAX     = static_cast<size_t>(std::numeric_limits<size_t>::max() / constants::DICT_SIZE);
-        auto transformer    = [=](size_t count){return std::clamp(count, MMIN, MMAX);}; 
+        auto transformer    = [=](size_t count){return std::max(MMIN, count);}; 
         std::transform(count.begin(), count.end(), count.begin(), transformer);
 
         return count;
     }
 
-    auto build(std::vector<size_t> counter) -> std::unique_ptr<CounterNode>{
+    static auto build(std::vector<size_t> counter) -> std::unique_ptr<CounterNode>{
 
         if (counter.size() != constants::DICT_SIZE){
             std::abort();
@@ -346,7 +348,7 @@ namespace dg::huffman_encoder::make{
         return std::move(heap.back());
     }
 
-    auto to_model(CounterNode * root) -> std::unique_ptr<model::Node>{
+    static auto to_model(CounterNode * root) -> std::unique_ptr<model::Node>{
 
         if (!root){
             return {};
@@ -360,7 +362,7 @@ namespace dg::huffman_encoder::make{
         return rs;
     } 
     
-    auto to_delim_model(model::Node * root) -> std::unique_ptr<model::DelimNode>{
+    static auto to_delim_model(model::Node * root) -> std::unique_ptr<model::DelimNode>{
 
         if (!root){
             return {};
@@ -375,7 +377,7 @@ namespace dg::huffman_encoder::make{
         return rs;
     }
 
-    void encode_dictionarize(model::DelimNode * root, std::vector<std::vector<bool>>& op, std::vector<bool>& trace){
+    static void encode_dictionarize(model::DelimNode * root, std::vector<std::vector<bool>>& op, std::vector<bool>& trace){
 
         bool is_leaf = !bool{root->r} && !bool{root->l};
 
@@ -395,7 +397,7 @@ namespace dg::huffman_encoder::make{
         trace.pop_back();
     }
 
-    auto encode_dictionarize(model::DelimNode * root) -> std::vector<std::vector<bool>>{
+    static auto encode_dictionarize(model::DelimNode * root) -> std::vector<std::vector<bool>>{
 
         auto rs     = std::vector<std::vector<bool>>(constants::DICT_SIZE);
         auto trace  = std::vector<bool>();
@@ -404,7 +406,7 @@ namespace dg::huffman_encoder::make{
         return rs;
     }
     
-    auto walk(model::DelimNode * root, std::deque<bool> trace) -> std::pair<std::vector<char>, size_t>{
+    static auto walk(model::DelimNode * root, std::deque<bool> trace) -> std::pair<std::vector<char>, size_t>{
 
         auto cursor     = root;
         auto init_sz    = trace.size();
@@ -443,7 +445,7 @@ namespace dg::huffman_encoder::make{
         return {{}, init_sz};    
     } 
 
-    auto decode_dictionarize(model::DelimNode * root) -> std::vector<std::pair<std::vector<char>, size_t>>{
+    static auto decode_dictionarize(model::DelimNode * root) -> std::vector<std::pair<std::vector<char>, size_t>>{
 
         auto rs     = std::vector<std::pair<std::vector<char>, size_t>>(constants::DICT_SIZE);
 
@@ -454,7 +456,7 @@ namespace dg::huffman_encoder::make{
         return rs;
     }
 
-    auto find_min_path_to_leaf(model::DelimNode * root, size_t depth = 0) -> std::pair<model::DelimNode *, size_t>{
+    static auto find_min_path_to_leaf(model::DelimNode * root, size_t depth = 0) -> std::pair<model::DelimNode *, size_t>{
         
         bool is_leaf    = !bool{root->r} && !bool{root->r};
 
@@ -472,7 +474,7 @@ namespace dg::huffman_encoder::make{
         return {r_leaf, r_depth};
     }
 
-    auto to_delim_tree(model::Node * huffman_tree) -> std::unique_ptr<model::DelimNode>{
+    static auto to_delim_tree(model::Node * huffman_tree) -> std::unique_ptr<model::DelimNode>{
 
         auto delim_model    = to_delim_model(huffman_tree);
 
@@ -485,7 +487,7 @@ namespace dg::huffman_encoder::make{
         return delim_model;
     } 
 
-    void find_delim(model::DelimNode * root, std::vector<std::vector<bool>>& rs, std::vector<bool>& trace){
+    static void find_delim(model::DelimNode * root, std::vector<std::vector<bool>>& rs, std::vector<bool>& trace){
 
         bool is_leaf    = !bool{root->l} && !bool{root->r};
 
@@ -503,7 +505,7 @@ namespace dg::huffman_encoder::make{
         trace.pop_back();
     }
 
-    auto find_delim(model::DelimNode * root) -> std::vector<std::vector<bool>>{
+    static auto find_delim(model::DelimNode * root) -> std::vector<std::vector<bool>>{
 
         auto trace  = std::vector<bool>{};
         auto rs     = std::vector<std::vector<bool>>(constants::ALPHABET_SIZE);
@@ -551,12 +553,10 @@ namespace dg::huffman_encoder::core{
 
                 op_buf  = bit_stream::stream_to(op_buf, this->delim[rem], rdbuf);
 
-                if (rem != 0){
-                    for (size_t i = 0; i < rem; ++i){
-                        op_buf  = bit_stream::stream_to(op_buf, bit_array::to_bit_array(ibuf[i]), rdbuf);
-                    }
-                }                
-
+                for (size_t i = 0; i < rem; ++i){
+                    op_buf  = bit_stream::stream_to(op_buf, bit_array::to_bit_array(ibuf[i]), rdbuf);
+                }
+                                
                 return op_buf;
             }
             
@@ -645,7 +645,6 @@ namespace dg::huffman_encoder::core{
             }
     };
 
-    // //API - should consider array approach if compile-time deterministic - 
     class RowEncodingEngine{
 
         private:
@@ -693,7 +692,7 @@ namespace dg::huffman_encoder::user_interface{
         return make::count(buf, sz);
     }
 
-    auto build(std::vector<size_t> counter) -> std::unique_ptr<model::Node>{ //WARNING: not independent of x32, x64
+    auto build(std::vector<size_t> counter) -> std::unique_ptr<model::Node>{
 
         auto counter_node   = make::build(make::clamp(std::move(counter)));
         return make::to_model(counter_node.get());
@@ -713,7 +712,7 @@ namespace dg::huffman_encoder::user_interface{
         return std::make_unique<core::FastEngine>(std::move(engine));
     }
 
-    auto spawn_row_engine(std::vector<std::unique_ptr<core::FastEngine>> engines){
+    auto spawn_row_engine(std::vector<std::unique_ptr<core::FastEngine>> engines) -> std::unique_ptr<core::RowEncodingEngine>{
 
         return std::make_unique<core::RowEncodingEngine>(std::move(engines));
     }
